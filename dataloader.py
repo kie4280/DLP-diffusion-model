@@ -25,7 +25,7 @@ class Training_dataset(Dataset):
         with open(filename) as f:
             self.dataset_dict = json.load(f)
         self.data_folder = dataset_folder
-        self.translater = LabelTransformer()
+        self.translator = LabelTransformer()
 
     def __len__(self):
         return len(self.dataset_dict)
@@ -33,15 +33,20 @@ class Training_dataset(Dataset):
     def __getitem__(self, index) -> Tuple[torch.Tensor, List[str]]:
         key = list(self.dataset_dict.keys())[index]
         filepath = f"{self.data_folder}/{key}"
-        img = torchvision.io.read_image(filepath).to(dtype=torch.float) / 255.0
+        img = (
+            torchvision.io.read_image(filepath, torchvision.io.ImageReadMode.RGB).to(
+                dtype=torch.float
+            )
+            / 255.0
+        )
         labels = torch.tensor(
-            tuple(self.translater.transform(x) for x in self.dataset_dict[key]),
+            tuple(self.translator.transform(x) for x in self.dataset_dict[key]),
             dtype=torch.long,
         )
         labels = torch.nn.functional.one_hot(
-            labels, num_classes=self.translater.label_num
+            labels, num_classes=self.translator.label_num
         )
-        labels = torch.sum(labels, dim=0).squeeze_()
+        labels = torch.sum(labels, dim=0, keepdim=True).to(dtype=torch.float)
 
         return (img, labels)
 
@@ -58,11 +63,11 @@ class Testing_dataset(Dataset):
 
     def __getitem__(self, index) -> List[str]:
         labels = torch.tensor(
-            (self.translater.transform(x) for x in self.dataset[index]),
+            tuple(self.translator.transform(x) for x in self.dataset[index]),
             dtype=torch.long,
         )
         labels = torch.nn.functional.one_hot(
-            labels, num_classes=self.translater.label_num
+            labels, num_classes=self.translator.label_num
         )
-        labels = torch.sum(labels, dim=0).squeeze_()
+        labels = torch.sum(labels, dim=0, keepdim=True).to(dtype=torch.float)
         return labels

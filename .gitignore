@@ -1,2 +1,4 @@
 iclevr/
 *.zip
+checkpoints/
+**/__pycache__/
