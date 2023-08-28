@@ -6,9 +6,11 @@ import torch
 from torch.utils.data import DataLoader
 import tqdm
 import os
+from torchvision import transforms
 import torchvision
 
 IMG_SIZE = (240, 320)
+TQDM_COL = 120
 
 
 def parse_args() -> Namespace:
@@ -17,11 +19,13 @@ def parse_args() -> Namespace:
     parser.add_argument("--epoch", default=50, type=int)
     parser.add_argument("--beta", default=1e-3, type=float)
     parser.add_argument("--train_iters", default=1000, type=int)
-    parser.add_argument("--infer_iters", default=50, type=int)
-    parser.add_argument("--lr", default=0.001, type=float)
-    parser.add_argument("--batch_size", default=1, type=int)
+    parser.add_argument("--infer_iters", default=30, type=int)
+    parser.add_argument("--lr", default=0.0001, type=float)
+    parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--regularization", default=1e-6, type=int)
     parser.add_argument("--test", action="store_true")
+    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--ckpt", default=None)
 
     return parser.parse_args()
 
@@ -39,9 +43,8 @@ def train(
     )
 
     for epoch in range(1, args.epoch + 1):
-        tq = tqdm.tqdm(train_dataloader)
+        tq = tqdm.tqdm(train_dataloader, ncols=TQDM_COL)
         for img, label in tq:
-            tq.set_description(f"epoch {epoch}")
             img = img.to(args.device)
             label = label.to(args.device)
             epsilon = torch.randn(img.shape).to(args.device)
@@ -49,15 +52,17 @@ def train(
                 dtype=torch.int, device=args.device
             )
             noisy_image = scheduler.add_noise(img, epsilon, timesteps)
-            pred_noise = model(noisy_image, timesteps, label).sample
-            loss = torch.nn.functional.mse_loss(pred_noise, noisy_image)
+            
             optim.zero_grad()
+            pred_noise = model(noisy_image, timesteps, label).sample
+            loss = torch.nn.functional.mse_loss(pred_noise, epsilon)
             loss.backward()
             optim.step()
+            tq.set_description(f"epoch {epoch}")
+            tq.set_postfix({"loss": loss.detach().cpu().item()})
 
-        if epoch % 5 == 4:
-            acc = test(args, model, test_dataloader, scheduler, evaluator)
-            torch.save(model.state_dict(), f"checkpoints/{epoch}_{acc}.pth")
+        acc = test(args, model, test_dataloader, scheduler, evaluator)
+        torch.save(model.state_dict(), f"checkpoints/{epoch}_{acc:.3f}.pth")
 
 
 def test(
@@ -67,10 +72,15 @@ def test(
     scheduler: DDPMScheduler,
     evaluator: evaluation_model,
 ):
-    tq = tqdm.tqdm(test_dataloader)
+    tq = tqdm.tqdm(test_dataloader, ncols=TQDM_COL)
     total = 0
-    normalize = torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    for label in tq:
+    transf = transforms.Compose(
+        [
+            transforms.Resize((64, 64), antialias=True),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ]
+    )
+    for i, label in enumerate(tq):
         label = label.to(args.device)
         scheduler.set_timesteps(args.infer_iters)
         noisy_img = torch.randn(size=(label.shape[0], 3, *IMG_SIZE)).to(args.device)
@@ -80,13 +90,16 @@ def test(
                 pred_noise = model(noisy_img, t, label).sample
             noisy_img = scheduler.step(pred_noise, t, noisy_img).prev_sample
 
-        total += evaluator.eval(normalize(noisy_img), label)
+        total += evaluator.eval(transf(noisy_img), label)
+        grid = torchvision.utils.make_grid(noisy_img)
+        torchvision.utils.save_image(grid, f"images/visual_{i}.png")
 
     return total / len(test_dataloader.dataset)
 
 
 def main(args):
     os.makedirs("checkpoints/", exist_ok=True)
+    os.makedirs("images/", exist_ok=True)
     net = UNet2DConditionModel(
         sample_size=IMG_SIZE,
         in_channels=3,
@@ -94,16 +107,14 @@ def main(args):
         encoder_hid_dim=24,
         layers_per_block=2,  # how many ResNet layers to use per UNet block
         block_out_channels=(
-            128,
+            32,
+            64,
             128,
             256,
-            256,
-            512,
             512,
         ),  # the number of output channels for each UNet block
         down_block_types=(
             "DownBlock2D",  # a regular ResNet downsampling block
-            "DownBlock2D",
             "DownBlock2D",
             "DownBlock2D",
             "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
@@ -112,7 +123,6 @@ def main(args):
         up_block_types=(
             "UpBlock2D",  # a regular ResNet upsampling block
             "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
-            "UpBlock2D",
             "UpBlock2D",
             "UpBlock2D",
             "UpBlock2D",
@@ -131,8 +141,13 @@ def main(args):
     eval_model = evaluation_model()
     scheduler = DDPMScheduler(args.train_iters)
 
+    if args.ckpt is not None:
+        l = torch.load(args.ckpt)
+        net.load_state_dict(l)
+
     if args.test:
         test(args, net, testing, scheduler, eval_model)
+        return
     train(args, net, training, testing, scheduler, eval_model)
 
 
