@@ -26,6 +26,7 @@ class Training_dataset(Dataset):
             self.dataset_dict = json.load(f)
         self.data_folder = dataset_folder
         self.translator = LabelTransformer()
+        print(f"loaded {len(self.dataset_dict.keys())} images from training")
 
     def __len__(self):
         return len(self.dataset_dict)
@@ -46,7 +47,7 @@ class Training_dataset(Dataset):
         labels = torch.nn.functional.one_hot(
             labels, num_classes=self.translator.label_num
         )
-        labels = torch.sum(labels, dim=0, keepdim=True).to(dtype=torch.float)
+        labels = torch.sum(labels, dim=0, keepdim=True).squeeze_().to(dtype=torch.float)
 
         return (img, labels)
 
@@ -69,5 +70,5 @@ class Testing_dataset(Dataset):
         labels = torch.nn.functional.one_hot(
             labels, num_classes=self.translator.label_num
         )
-        labels = torch.sum(labels, dim=0, keepdim=True).to(dtype=torch.float)
+        labels = torch.sum(labels, dim=0, keepdim=True).squeeze_().to(dtype=torch.float)
         return labels

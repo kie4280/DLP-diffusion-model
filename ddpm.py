@@ -1,9 +1,10 @@
-from diffusers import DDPMScheduler, UNet2DConditionModel
+from diffusers import DDPMScheduler, UNet2DModel
 from argparse import ArgumentParser, Namespace
 from dataloader import Training_dataset, LabelTransformer, Testing_dataset
 from evaluator import evaluation_model
 import torch
 from torch.utils.data import DataLoader
+import torch.nn as nn
 import tqdm
 import os
 from torchvision import transforms
@@ -32,11 +33,11 @@ def parse_args() -> Namespace:
 
 def train(
     args,
-    model: UNet2DConditionModel,
+    model: UNet2DModel,
     train_dataloader: DataLoader,
     test_dataloader: DataLoader,
     scheduler: DDPMScheduler,
-    evaluator: evaluation_model,
+    # evaluator: evaluation_model,
 ):
     optim = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.regularization
@@ -61,13 +62,13 @@ def train(
             tq.set_description(f"epoch {epoch}")
             tq.set_postfix({"loss": loss.detach().cpu().item()})
 
-        acc = test(args, model, test_dataloader, scheduler, evaluator)
-        torch.save(model.state_dict(), f"checkpoints/{epoch}_{acc:.3f}.pth")
+        # acc = test(args, model, test_dataloader, scheduler, evaluator)
+        torch.save(model.state_dict(), f"checkpoints/{epoch}.pth")
 
 
 def test(
     args,
-    model: UNet2DConditionModel,
+    model: UNet2DModel,
     test_dataloader: DataLoader,
     scheduler: DDPMScheduler,
     evaluator: evaluation_model,
@@ -100,17 +101,17 @@ def test(
 def main(args):
     os.makedirs("checkpoints/", exist_ok=True)
     os.makedirs("images/", exist_ok=True)
-    net = UNet2DConditionModel(
+    net = UNet2DModel(
         sample_size=IMG_SIZE,
         in_channels=3,
         out_channels=3,
-        encoder_hid_dim=24,
+        class_embed_type=None,
         layers_per_block=2,  # how many ResNet layers to use per UNet block
         block_out_channels=(
-            32,
-            64,
             128,
             256,
+            256,
+            512,
             512,
         ),  # the number of output channels for each UNet block
         down_block_types=(
@@ -128,6 +129,7 @@ def main(args):
             "UpBlock2D",
         ),
     ).to(args.device)
+    net.class_embedding = nn.Linear(24, 128 * 4).to(args.device)
 
     training = DataLoader(
         Training_dataset(), batch_size=args.batch_size, shuffle=True, num_workers=4
@@ -148,7 +150,7 @@ def main(args):
     if args.test:
         test(args, net, testing, scheduler, eval_model)
         return
-    train(args, net, training, testing, scheduler, eval_model)
+    train(args, net, training, testing, scheduler)
 
 
 if __name__ == "__main__":
