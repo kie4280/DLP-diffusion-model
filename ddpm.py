@@ -108,10 +108,10 @@ def main(args):
         class_embed_type=None,
         layers_per_block=2,  # how many ResNet layers to use per UNet block
         block_out_channels=(
+            32,
+            64,
             128,
             256,
-            256,
-            512,
             512,
         ),  # the number of output channels for each UNet block
         down_block_types=(
@@ -129,7 +129,7 @@ def main(args):
             "UpBlock2D",
         ),
     ).to(args.device)
-    net.class_embedding = nn.Linear(24, 128 * 4).to(args.device)
+    net.class_embedding = nn.Linear(24, 32 * 4).to(args.device)
 
     training = DataLoader(
         Training_dataset(), batch_size=args.batch_size, shuffle=True, num_workers=4
