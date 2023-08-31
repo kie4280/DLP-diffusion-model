@@ -5,6 +5,7 @@ from typing import List, Tuple
 import torchvision
 import glob
 import pathlib
+from torchvision import transforms
 
 
 class LabelTransformer:
@@ -26,6 +27,7 @@ class Training_dataset(Dataset):
             self.dataset_dict = json.load(f)
         self.data_folder = dataset_folder
         self.translator = LabelTransformer()
+        self.transform = transforms.Resize((64,64), antialias=True)
         print(f"loaded {len(self.dataset_dict.keys())} images from training")
 
     def __len__(self):
@@ -40,6 +42,8 @@ class Training_dataset(Dataset):
             )
             / 255.0
         )
+        img = self.transform(img)
+        
         labels = torch.tensor(
             tuple(self.translator.transform(x) for x in self.dataset_dict[key]),
             dtype=torch.long,
@@ -72,3 +76,8 @@ class Testing_dataset(Dataset):
         )
         labels = torch.sum(labels, dim=0, keepdim=True).squeeze_().to(dtype=torch.float)
         return labels
+
+
+if __name__ == "__main__":
+    training = Training_dataset()
+    print(training[2][0].max())

@@ -9,6 +9,7 @@ import tqdm
 import os
 from torchvision import transforms
 import torchvision
+import numpy as np
 
 IMG_SIZE = (240, 320)
 TQDM_COL = 120
@@ -20,13 +21,14 @@ def parse_args() -> Namespace:
     parser.add_argument("--epoch", default=50, type=int)
     parser.add_argument("--beta", default=1e-3, type=float)
     parser.add_argument("--train_iters", default=1000, type=int)
-    parser.add_argument("--infer_iters", default=30, type=int)
+    parser.add_argument("--infer_iters", default=500, type=int)
     parser.add_argument("--lr", default=0.0001, type=float)
-    parser.add_argument("--batch_size", default=4, type=int)
-    parser.add_argument("--regularization", default=1e-6, type=int)
+    parser.add_argument("--batch_size", default=32, type=int)
+    parser.add_argument("--regularization", default=0, type=int)
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--ckpt", default=None)
+    parser.add_argument("--save_img", default=True, action="store_true")
 
     return parser.parse_args()
 
@@ -53,7 +55,7 @@ def train(
                 dtype=torch.int, device=args.device
             )
             noisy_image = scheduler.add_noise(img, epsilon, timesteps)
-            
+
             optim.zero_grad()
             pred_noise = model(noisy_image, timesteps, label).sample
             loss = torch.nn.functional.mse_loss(pred_noise, epsilon)
@@ -64,6 +66,44 @@ def train(
 
         # acc = test(args, model, test_dataloader, scheduler, evaluator)
         torch.save(model.state_dict(), f"checkpoints/{epoch}.pth")
+        if args.save_img and epoch % 3 == 0:
+            generate_img(args, model, test_dataloader, scheduler)
+
+
+def generate_img(
+    args,
+    model: UNet2DModel,
+    test_dataloader: DataLoader,
+    scheduler: DDPMScheduler,
+):
+    tq = tqdm.tqdm(test_dataloader, ncols=TQDM_COL)
+    images = []
+    step_size = np.floor(args.infer_iters / 11)
+    targets = np.arange(
+        start=0, stop=step_size * 11, step=step_size
+    )
+    for batch_idx, label in enumerate(tq):
+        label = label.to(args.device)
+        scheduler.set_timesteps(args.infer_iters)
+        noisy_img = torch.randn(size=(label.shape[0], 3, 64, 64)).to(args.device)
+        progressive = torch.zeros((11, 3, 64, 64)).to(args.device)
+        progress_idx = 0
+
+        for idx, t in enumerate(scheduler.timesteps):
+            with torch.no_grad():
+                pred_noise = model(noisy_img, t, label).sample
+
+            s = scheduler.step(pred_noise, t, noisy_img)
+            noisy_img = s.prev_sample
+            if idx <= targets[-1] and idx == targets[progress_idx]:
+                progressive[progress_idx] = s.pred_original_sample[0]
+                progress_idx += 1
+        images.append(noisy_img)
+
+    progressive = torchvision.utils.make_grid(progressive, nrow=11)
+    torchvision.utils.save_image(progressive, f"images/generation.png")
+    grid = torchvision.utils.make_grid(torch.cat(images, dim=0))
+    torchvision.utils.save_image(grid, f"images/visual.png")
 
 
 def test(
@@ -75,16 +115,11 @@ def test(
 ):
     tq = tqdm.tqdm(test_dataloader, ncols=TQDM_COL)
     total = 0
-    transf = transforms.Compose(
-        [
-            transforms.Resize((64, 64), antialias=True),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
+    transf = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     for i, label in enumerate(tq):
         label = label.to(args.device)
-        scheduler.set_timesteps(args.infer_iters)
-        noisy_img = torch.randn(size=(label.shape[0], 3, *IMG_SIZE)).to(args.device)
+        scheduler.set_timesteps(1000)
+        noisy_img = torch.randn(size=(label.shape[0], 3, 64, 64)).to(args.device)
 
         for t in scheduler.timesteps:
             with torch.no_grad():
@@ -92,30 +127,30 @@ def test(
             noisy_img = scheduler.step(pred_noise, t, noisy_img).prev_sample
 
         total += evaluator.eval(transf(noisy_img), label)
-        grid = torchvision.utils.make_grid(noisy_img)
-        torchvision.utils.save_image(grid, f"images/visual_{i}.png")
 
-    return total / len(test_dataloader.dataset)
+    return total / len(test_dataloader)
 
 
 def main(args):
     os.makedirs("checkpoints/", exist_ok=True)
     os.makedirs("images/", exist_ok=True)
     net = UNet2DModel(
-        sample_size=IMG_SIZE,
+        sample_size=(64, 64),
         in_channels=3,
         out_channels=3,
         class_embed_type=None,
         layers_per_block=2,  # how many ResNet layers to use per UNet block
         block_out_channels=(
-            32,
-            64,
+            128,
             128,
             256,
+            256,
+            512,
             512,
         ),  # the number of output channels for each UNet block
         down_block_types=(
             "DownBlock2D",  # a regular ResNet downsampling block
+            "DownBlock2D",
             "DownBlock2D",
             "DownBlock2D",
             "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
@@ -127,28 +162,37 @@ def main(args):
             "UpBlock2D",
             "UpBlock2D",
             "UpBlock2D",
+            "UpBlock2D",
         ),
     ).to(args.device)
-    net.class_embedding = nn.Linear(24, 32 * 4).to(args.device)
+    del net.class_embedding
+    net.class_embedding = nn.Linear(24, 128 * 4).to(args.device)
 
     training = DataLoader(
         Training_dataset(), batch_size=args.batch_size, shuffle=True, num_workers=4
     )
     testing = DataLoader(
         Testing_dataset("test.json"),
-        batch_size=args.batch_size,
+        batch_size=8,
         shuffle=False,
         num_workers=4,
     )
-    eval_model = evaluation_model()
-    scheduler = DDPMScheduler(args.train_iters)
+    scheduler = DDPMScheduler(
+        args.train_iters,
+        beta_start=0.0001,
+        beta_end=0.02,
+        beta_schedule="squaredcos_cap_v2",
+    )
 
     if args.ckpt is not None:
         l = torch.load(args.ckpt)
         net.load_state_dict(l)
 
     if args.test:
-        test(args, net, testing, scheduler, eval_model)
+        eval_model = evaluation_model()
+        generate_img(args, net, testing, scheduler)
+        avg_acc = test(args, net, testing, scheduler, eval_model)
+        print(f"average score {avg_acc}")
         return
     train(args, net, training, testing, scheduler)
 
