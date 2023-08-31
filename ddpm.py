@@ -172,7 +172,7 @@ def main(args):
         Training_dataset(), batch_size=args.batch_size, shuffle=True, num_workers=4
     )
     testing = DataLoader(
-        Testing_dataset("test.json"),
+        Testing_dataset("new_test.json"),
         batch_size=8,
         shuffle=False,
         num_workers=4,
